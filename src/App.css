@@ -214,6 +214,14 @@ body,
   justify-content: space-between;
 }
 
+.update-toast {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9000;
+  max-width: 360px;
+}
+
 @media (max-width: 640px) {
   .row-3 {
     grid-template-columns: 1fr;

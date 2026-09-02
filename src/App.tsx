@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  ActionableNotification,
   Button,
   Checkbox,
   ContentSwitcher,
@@ -211,6 +214,48 @@ async function notify(title: string, body: string) {
   }
 }
 
+interface UpdateInfo {
+  latest: string;
+  url: string;
+}
+
+const GITHUB_REPO = "jrodriguezcovelo/pomodoro-timer";
+
+function parseVersion(v: string): number[] {
+  return v
+    .replace(/^v/, "")
+    .split(".")
+    .map((n) => parseInt(n, 10) || 0);
+}
+
+function isNewer(latest: string, current: string): boolean {
+  const a = parseVersion(latest);
+  const b = parseVersion(current);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+async function checkForUpdate(): Promise<UpdateInfo | null> {
+  try {
+    const current = await getVersion();
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const tag = data.tag_name as string | undefined;
+    const url = data.html_url as string | undefined;
+    if (!tag || !url) return null;
+    if (isNewer(tag, current)) return { latest: tag, url };
+  } catch {
+    /* sin conexión o API bloqueada */
+  }
+  return null;
+}
+
 function NumField({
   label,
   value,
@@ -268,6 +313,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newTask, setNewTask] = useState("");
   const [melodyName, setMelodyName] = useState("");
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const lastTickRef = useRef<TimerState | null>(null);
   const configRef = useRef<Config | null>(null);
 
@@ -313,6 +359,12 @@ function App() {
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  useEffect(() => {
+    checkForUpdate().then((u) => {
+      if (u) setUpdate(u);
+    });
+  }, []);
 
   useEffect(() => {
     if (!config) return;
@@ -391,6 +443,19 @@ function App() {
 
   return (
     <Theme theme={config.theme}>
+      {update && (
+        <div className="update-toast">
+          <ActionableNotification
+            kind="info"
+            title="Actualización disponible"
+            subtitle={`Nueva versión: ${update.latest}`}
+            actionButtonLabel="Ver release"
+            onActionButtonClick={() => openUrl(update.url)}
+            onClose={() => setUpdate(null)}
+            inline
+          />
+        </div>
+      )}
       <div className="app" style={{ background: bg }}>
         <header className="topbar">
           <ContentSwitcher
