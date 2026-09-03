@@ -45,6 +45,18 @@ struct SavedMelody {
     melody: Vec<Note>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MidiSound {
+    id: String,
+    name: String,
+    data: String,
+    #[serde(default)]
+    from: f64,
+    #[serde(default)]
+    to: Option<f64>,
+}
+
 fn default_tempo() -> f64 {
     120.0
 }
@@ -83,6 +95,8 @@ struct Config {
     melody: Vec<Note>,
     #[serde(default)]
     saved_melodies: Vec<SavedMelody>,
+    #[serde(default)]
+    midi_sounds: Vec<MidiSound>,
     tasks: Vec<Task>,
 }
 
@@ -103,6 +117,7 @@ impl Default for Config {
             wave: default_wave(),
             melody: default_melody(),
             saved_melodies: vec![],
+            midi_sounds: vec![],
             tasks: vec![],
         }
     }

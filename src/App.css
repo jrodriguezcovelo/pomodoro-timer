@@ -188,6 +188,12 @@ body,
   margin-bottom: 8px;
 }
 
+.melody-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .melody-save {
   display: flex;
   gap: 8px;
@@ -212,6 +218,75 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.midi-sounds {
+  margin-top: 16px;
+}
+
+.midi-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.midi-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.midi-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 16px;
+}
+
+.midi-dialog {
+  background: var(--cds-layer);
+  color: var(--cds-text-primary);
+  border-radius: 8px;
+  padding: 20px;
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+}
+
+.midi-dialog-title {
+  margin: 0;
+}
+
+.midi-preview {
+  width: 100%;
+  height: 140px;
+  display: block;
+  border: 1px solid var(--cds-border-subtle);
+  border-radius: 4px;
+  background: var(--cds-layer-hover);
+  touch-action: none;
+}
+
+.midi-window-info {
+  font-size: 0.875rem;
+  color: var(--cds-text-secondary);
+}
+
+.midi-window-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .update-toast {

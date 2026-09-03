@@ -19,6 +19,7 @@ import {
 } from "@carbon/react";
 import {
   Add,
+  DocumentImport,
   ListChecked,
   Moon,
   Pause,
@@ -26,6 +27,7 @@ import {
   Reset,
   Save,
   Settings,
+  StopFilled,
   Sun,
   TrashCan,
   VolumeUp,
@@ -35,6 +37,8 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { Midi } from "@tonejs/midi";
+import MidiPreview from "./MidiPreview";
 import "./App.css";
 
 type Mode = "focus" | "shortBreak" | "longBreak";
@@ -59,6 +63,14 @@ interface SavedMelody {
   melody: Note[];
 }
 
+interface MidiSound {
+  id: string;
+  name: string;
+  data: string;
+  from: number;
+  to?: number | null;
+}
+
 interface Config {
   focusMin: number;
   shortBreakMin: number;
@@ -74,6 +86,7 @@ interface Config {
   wave: string;
   melody: Note[];
   savedMelodies: SavedMelody[];
+  midiSounds: MidiSound[];
   tasks: Task[];
 }
 
@@ -104,6 +117,7 @@ const DEFAULT_CONFIG: Config = {
     { id: "4", freq: 392.0, beats: 2 },
   ],
   savedMelodies: [],
+  midiSounds: [],
   tasks: [],
 };
 
@@ -137,6 +151,78 @@ function randomNote(): Note {
   };
 }
 
+function midiToFreq(midi: number): number {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function bufToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+// --- audio idempotente: un solo contexto activo, detenible ---
+let activeCtx: AudioContext | null = null;
+let activeEndTimer: ReturnType<typeof setTimeout> | null = null;
+let onActiveEnd: (() => void) | null = null;
+
+function stopAudio() {
+  if (activeEndTimer !== null) {
+    clearTimeout(activeEndTimer);
+    activeEndTimer = null;
+  }
+  if (activeCtx) {
+    activeCtx.close().catch(() => {});
+    activeCtx = null;
+  }
+  const cb = onActiveEnd;
+  onActiveEnd = null;
+  if (cb) cb();
+}
+
+function beginAudio(): AudioContext {
+  stopAudio();
+  const ctx = new AudioContext();
+  activeCtx = ctx;
+  return ctx;
+}
+
+function endAudioAfter(total: number, onEnd?: () => void) {
+  onActiveEnd = onEnd ?? null;
+  activeEndTimer = setTimeout(() => stopAudio(), (total + 0.3) * 1000);
+}
+
+// Reproduce un MIDI completo de forma directa: todas las pistas con su tiempo y
+// polifonía. Cada pista usa una onda distinta para mantener canales separados.
+function playMidiData(
+  data: string,
+  onEnd?: () => void,
+  from = 0,
+  to?: number,
+  trackIndex?: number,
+) {
+  const ctx = beginAudio();
+  const midi = new Midi(base64ToBytes(data));
+  const waves: OscillatorType[] = ["sine", "triangle", "square", "sawtooth"];
+  midi.tracks.forEach((track, i) => {
+    if (trackIndex !== undefined && i !== trackIndex) return;
+    const wave = waves[i % waves.length];
+    for (const n of track.notes) {
+      if (n.time < from) continue;
+      if (to !== undefined && n.time > to) continue;
+      tone(ctx, midiToFreq(n.midi), wave, n.time - from, n.duration);
+    }
+  });
+  endAudioAfter((to ?? midi.duration) - from + 0.5, onEnd);
+}
+
 function fmt(secs: number) {
   const m = Math.floor(secs / 60).toString().padStart(2, "0");
   const s = (secs % 60).toString().padStart(2, "0");
@@ -163,13 +249,40 @@ function tone(
   osc.stop(ctx.currentTime + start + dur + 0.05);
 }
 
-function playSound(cfg: Config) {
-  const ctx = new AudioContext();
+// Dos osciladores desafinados y paneados L/R: da amplitud estéreo al tono.
+function toneWide(ctx: AudioContext, freq: number, wave: OscillatorType, start: number, dur: number) {
+  const make = (detune: number, pan: number, gainVal: number) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const panner = ctx.createStereoPanner();
+    osc.type = wave;
+    osc.frequency.value = freq;
+    osc.detune.value = detune;
+    panner.pan.value = pan;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+    gain.gain.exponentialRampToValueAtTime(gainVal, ctx.currentTime + start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
+    osc.connect(gain).connect(panner).connect(ctx.destination);
+    osc.start(ctx.currentTime + start);
+    osc.stop(ctx.currentTime + start + dur + 0.05);
+  };
+  make(-6, -0.5, 0.16);
+  make(6, 0.5, 0.16);
+}
+
+function playSound(cfg: Config, onEnd?: () => void) {
+  if (cfg.sound === "none") return;
+  if (cfg.sound.startsWith("midi:")) {
+    const id = cfg.sound.slice(5);
+    const found = cfg.midiSounds.find((m) => m.id === id);
+    if (found) {
+      playMidiData(found.data, onEnd, found.from || 0, found.to ?? undefined);
+      return;
+    }
+  }
+  const ctx = beginAudio();
   let total = 1.2;
   switch (cfg.sound) {
-    case "none":
-      ctx.close();
-      return;
     case "double":
       tone(ctx, 880, "sine", 0, 0.18);
       tone(ctx, 660, "sine", 0.22, 0.25);
@@ -190,7 +303,7 @@ function playSound(cfg: Config) {
       let t = 0;
       for (const note of cfg.melody) {
         const dur = Math.max(0.05, note.beats) * spb;
-        tone(ctx, note.freq, cfg.wave as OscillatorType, t, dur);
+        toneWide(ctx, note.freq, cfg.wave as OscillatorType, t, dur);
         t += dur;
       }
       total = t + 0.2;
@@ -201,7 +314,7 @@ function playSound(cfg: Config) {
       tone(ctx, 880, "sine", 0, 0.35);
       break;
   }
-  setTimeout(() => ctx.close(), (total + 0.2) * 1000);
+  endAudioAfter(total, onEnd);
 }
 
 async function notify(title: string, body: string) {
@@ -314,8 +427,23 @@ function App() {
   const [newTask, setNewTask] = useState("");
   const [melodyName, setMelodyName] = useState("");
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [midiPending, setMidiPending] = useState<{
+    data: string;
+    duration: number;
+    tempo: number;
+    name: string;
+    mode: "editor" | "sound";
+    tracks: { time: number; duration: number; midi: number }[][];
+    notes: { time: number; duration: number; midi: number }[];
+  } | null>(null);
+  const [midiFrom, setMidiFrom] = useState(0);
+  const [midiTo, setMidiTo] = useState(10);
+  const [selectedTrack, setSelectedTrack] = useState(0);
+  const [playing, setPlaying] = useState<"preview" | "midi" | null>(null);
   const lastTickRef = useRef<TimerState | null>(null);
   const configRef = useRef<Config | null>(null);
+  const midiInputRef = useRef<HTMLInputElement>(null);
+  const midiSoundInputRef = useRef<HTMLInputElement>(null);
 
   const save = useCallback(async (cfg: Config) => {
     setConfig(cfg);
@@ -387,7 +515,15 @@ function App() {
   const resume = async () => applyTimer(await invoke<TimerState>("resume_timer"));
   const reset = async () => applyTimer(await invoke<TimerState>("reset_timer"));
 
-  const preview = () => playSound(config);
+  const togglePreview = () => {
+    if (playing === "preview") {
+      stopAudio();
+      setPlaying(null);
+    } else {
+      playSound(config, () => setPlaying(null));
+      setPlaying("preview");
+    }
+  };
 
   const addNote = () => save({ ...config, melody: [...config.melody, randomNote()] });
 
@@ -421,6 +557,92 @@ function App() {
 
   const removeMelody = (id: string) =>
     save({ ...config, savedMelodies: config.savedMelodies.filter((m) => m.id !== id) });
+
+  const handleMidiFile = async (file: File, mode: "editor" | "sound") => {
+    try {
+      const buf = await file.arrayBuffer();
+      const midi = new Midi(buf);
+      const tempo = midi.header.tempos[0]?.bpm ?? 120;
+      const tracks = midi.tracks.map((t) =>
+        t.notes.map((n) => ({
+          time: n.time,
+          duration: n.duration,
+          midi: n.midi,
+        })),
+      );
+      const notes = tracks.flat();
+      const first = tracks.findIndex((t) => t.length > 0);
+      setSelectedTrack(first >= 0 ? first : 0);
+      setMidiPending({
+        data: bufToBase64(buf),
+        duration: midi.duration,
+        tempo,
+        name: file.name.replace(/\.(mid|midi)$/i, ""),
+        mode,
+        tracks,
+        notes,
+      });
+      setMidiFrom(0);
+      setMidiTo(Math.min(10, midi.duration));
+    } catch {
+      setMidiPending(null);
+    }
+  };
+
+  const confirmMidi = () => {
+    if (!midiPending) return;
+    const { data, tempo, name, mode } = midiPending;
+    const from = midiFrom;
+    const to = Math.max(midiTo, from);
+    if (mode === "sound") {
+      const sound: MidiSound = {
+        id: crypto.randomUUID(),
+        name,
+        data,
+        from,
+        to,
+      };
+      save({ ...config, midiSounds: [...config.midiSounds, sound], sound: `midi:${sound.id}` });
+    } else {
+      const track = midiPending.tracks[selectedTrack] ?? [];
+      const melody = track
+        .filter((n) => n.time >= from && n.time < to)
+        .sort((a, b) => a.time - b.time)
+        .map((n) => ({
+          id: crypto.randomUUID(),
+          freq: Math.round(midiToFreq(n.midi) * 100) / 100,
+          beats: Math.min(32, Math.max(0.125, Math.round((n.duration * tempo) / 60 * 1000) / 1000)),
+        }));
+      setMidiPending(null);
+      if (melody.length === 0) return;
+      save({ ...config, tempo: Math.round(tempo * 100) / 100, melody });
+    }
+    setMidiPending(null);
+  };
+
+  const toggleAudition = () => {
+    if (!midiPending) return;
+    if (playing === "midi") {
+      stopAudio();
+      setPlaying(null);
+    } else {
+      playMidiData(
+        midiPending.data,
+        () => setPlaying(null),
+        midiFrom,
+        midiTo,
+        midiPending.mode === "editor" ? selectedTrack : undefined,
+      );
+      setPlaying("midi");
+    }
+  };
+
+  const removeMidiSound = (id: string) =>
+    save({
+      ...config,
+      midiSounds: config.midiSounds.filter((m) => m.id !== id),
+      sound: config.sound === `midi:${id}` ? "beep" : config.sound,
+    });
 
   const addTask = () => {
     const text = newTask.trim();
@@ -555,8 +777,18 @@ function App() {
           primaryButtonText="Listo"
           secondaryButtonText="Cancelar"
           size="md"
-          onRequestSubmit={() => setSettingsOpen(false)}
-          onRequestClose={() => setSettingsOpen(false)}
+          onRequestSubmit={() => {
+            setSettingsOpen(false);
+            setMidiPending(null);
+            stopAudio();
+            setPlaying(null);
+          }}
+          onRequestClose={() => {
+            setSettingsOpen(false);
+            setMidiPending(null);
+            stopAudio();
+            setPlaying(null);
+          }}
         >
           <Stack gap={6}>
             <section>
@@ -627,19 +859,69 @@ function App() {
                     <SelectItem value="chime" text="Campana" />
                     <SelectItem value="success" text="Éxito" />
                     <SelectItem value="custom" text="Personalizado" />
+                    {config.midiSounds.map((m) => (
+                      <SelectItem key={m.id} value={`midi:${m.id}`} text={`MIDI: ${m.name}`} />
+                    ))}
                     <SelectItem value="none" text="Sin sonido" />
                   </Select>
                 </div>
                 <Button
                   kind="ghost"
                   size="sm"
-                  renderIcon={VolumeUp}
+                  renderIcon={playing === "preview" ? StopFilled : VolumeUp}
                   disabled={config.sound === "none"}
-                  onClick={preview}
+                  onClick={togglePreview}
                 >
-                  Probar
+                  {playing === "preview" ? "Detener" : "Probar"}
                 </Button>
               </div>
+
+              <div className="midi-sounds">
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  renderIcon={DocumentImport}
+                  onClick={() => midiSoundInputRef.current?.click()}
+                >
+                  Añadir MIDI como sonido
+                </Button>
+                <input
+                  ref={midiSoundInputRef}
+                  type="file"
+                  accept=".mid,.midi"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleMidiFile(file, "sound");
+                    e.target.value = "";
+                  }}
+                />
+                {config.midiSounds.length > 0 && (
+                  <ul className="midi-list">
+                    {config.midiSounds.map((m) => (
+                      <li key={m.id} className="midi-item">
+                        <Button
+                          kind={config.sound === `midi:${m.id}` ? "primary" : "ghost"}
+                          size="sm"
+                          onClick={() => save({ ...config, sound: `midi:${m.id}` })}
+                        >
+                          {m.name}
+                        </Button>
+                        <IconButton
+                          kind="ghost"
+                          size="sm"
+                          align="bottom-end"
+                          label={`Eliminar ${m.name}`}
+                          onClick={() => removeMidiSound(m.id)}
+                        >
+                          <TrashCan />
+                        </IconButton>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
               {config.sound === "custom" && (
                 <div className="melody">
                   <div className="row-2">
@@ -674,15 +956,16 @@ function App() {
                         label="Frecuencia (Hz)"
                         min={20}
                         max={20000}
+                        decimals={2}
                         value={note.freq}
                         onChange={(n) => updateNote(note.id, { ...note, freq: n })}
                       />
                       <NumField
                         hideLabel
                         label="Tiempos"
-                        min={0.25}
-                        max={16}
-                        decimals={2}
+                        min={0.125}
+                        max={32}
+                        decimals={3}
                         value={note.beats}
                         onChange={(n) => updateNote(note.id, { ...note, beats: n })}
                       />
@@ -697,9 +980,31 @@ function App() {
                       </IconButton>
                     </div>
                   ))}
-                  <Button kind="ghost" size="sm" renderIcon={Add} onClick={addNote}>
-                    Añadir nota
-                  </Button>
+                  <div className="melody-actions">
+                    <Button kind="ghost" size="sm" renderIcon={Add} onClick={addNote}>
+                      Añadir nota
+                    </Button>
+                    <Button
+                      kind="ghost"
+                      size="sm"
+                      renderIcon={DocumentImport}
+                      onClick={() => midiInputRef.current?.click()}
+                    >
+                      Importar MIDI
+                    </Button>
+                    <input
+                      ref={midiInputRef}
+                      type="file"
+                      accept=".mid,.midi"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleMidiFile(file, "editor");
+                        e.target.value = "";
+                      }}
+                    />
+                  </div>
+
 
                   <div className="melody-save">
                     <TextInput
@@ -779,6 +1084,69 @@ function App() {
             </Button>
           </Stack>
         </Modal>
+
+        {midiPending && (
+          <div className="midi-overlay">
+            <div className="midi-dialog">
+              <h4 className="midi-dialog-title">
+                {midiPending.mode === "sound" ? "Añadir MIDI como sonido" : "Importar MIDI a melodía"}
+              </h4>
+              {midiPending.mode === "editor" && (
+                <Select
+                  id="midi-track"
+                  labelText="Pista del MIDI"
+                  value={String(selectedTrack)}
+                  onChange={(e) => setSelectedTrack(Number(e.target.value))}
+                >
+                  {midiPending.tracks.map((t, i) => (
+                    <SelectItem key={i} value={String(i)} text={`Pista ${i + 1} (${t.length} notas)`} />
+                  ))}
+                </Select>
+              )}
+              <MidiPreview
+                notes={
+                  midiPending.mode === "editor"
+                    ? midiPending.tracks[selectedTrack] ?? []
+                    : midiPending.notes
+                }
+                duration={midiPending.duration}
+                from={midiFrom}
+                to={midiTo}
+                onChange={(f, t) => {
+                  setMidiFrom(f);
+                  setMidiTo(t);
+                }}
+              />
+              <div className="midi-window-info">
+                Desde {midiFrom.toFixed(1)}s · hasta {midiTo.toFixed(1)}s (ventana 1–10s)
+              </div>
+              <div className="midi-window-actions">
+                <Button kind="secondary" size="sm" onClick={confirmMidi}>
+                  {midiPending.mode === "sound" ? "Guardar sonido" : "Importar"}
+                </Button>
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  renderIcon={playing === "midi" ? StopFilled : Play}
+                  onClick={toggleAudition}
+                >
+                  {playing === "midi" ? "Detener" : "Escuchar"}
+                </Button>
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setMidiPending(null);
+                    stopAudio();
+                    setPlaying(null);
+                  }}
+                >
+                  Cancelar
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </Theme>
   );
