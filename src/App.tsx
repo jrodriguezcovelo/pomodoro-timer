@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -39,6 +39,8 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { Midi } from "@tonejs/midi";
 import MidiPreview from "./MidiPreview";
+import WaveEditor, { buildPeriodicWave, defaultWaveChannels, WaveChannel } from "./WaveEditor";
+import NumField from "./NumField";
 import "./App.css";
 
 type Mode = "focus" | "shortBreak" | "longBreak";
@@ -60,6 +62,7 @@ interface SavedMelody {
   name: string;
   tempo: number;
   wave: string;
+  customWave?: WaveChannel[];
   melody: Note[];
 }
 
@@ -84,6 +87,7 @@ interface Config {
   sound: string;
   tempo: number;
   wave: string;
+  customWave: WaveChannel[];
   melody: Note[];
   savedMelodies: SavedMelody[];
   midiSounds: MidiSound[];
@@ -110,6 +114,7 @@ const DEFAULT_CONFIG: Config = {
   sound: "beep",
   tempo: 120,
   wave: "sine",
+  customWave: defaultWaveChannels(),
   melody: [
     { id: "1", freq: 261.63, beats: 1 },
     { id: "2", freq: 293.66, beats: 1 },
@@ -229,17 +234,20 @@ function fmt(secs: number) {
   return `${m}:${s}`;
 }
 
+type Wave = OscillatorType | PeriodicWave;
+
 function tone(
   ctx: AudioContext,
   freq: number,
-  wave: OscillatorType,
+  wave: Wave,
   start: number,
   dur: number,
   gainVal = 0.2,
 ) {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  osc.type = wave;
+  if (typeof wave === "string") osc.type = wave as OscillatorType;
+  else osc.setPeriodicWave(wave);
   osc.frequency.value = freq;
   gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
   gain.gain.exponentialRampToValueAtTime(gainVal, ctx.currentTime + start + 0.02);
@@ -250,12 +258,21 @@ function tone(
 }
 
 // Dos osciladores desafinados y paneados L/R: da amplitud estéreo al tono.
-function toneWide(ctx: AudioContext, freq: number, wave: OscillatorType, start: number, dur: number) {
+function toneWide(
+  ctx: AudioContext,
+  freq: number,
+  wave: Wave,
+  start: number,
+  dur: number,
+  gainVal = 0.16,
+  detuneCents = 0,
+) {
   const make = (detune: number, pan: number, gainVal: number) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     const panner = ctx.createStereoPanner();
-    osc.type = wave;
+    if (typeof wave === "string") osc.type = wave as OscillatorType;
+    else osc.setPeriodicWave(wave);
     osc.frequency.value = freq;
     osc.detune.value = detune;
     panner.pan.value = pan;
@@ -266,8 +283,25 @@ function toneWide(ctx: AudioContext, freq: number, wave: OscillatorType, start: 
     osc.start(ctx.currentTime + start);
     osc.stop(ctx.currentTime + start + dur + 0.05);
   };
-  make(-6, -0.5, 0.16);
-  make(6, 0.5, 0.16);
+  make(-6 + detuneCents, -0.5, gainVal);
+  make(6 + detuneCents, 0.5, gainVal);
+}
+
+// Onda personalizada: un oscilador por canal, con su ganancia y detune. El
+// desfase va dentro de los coeficientes (buildPeriodicWave).
+function toneChannels(
+  ctx: AudioContext,
+  freq: number,
+  channels: WaveChannel[],
+  start: number,
+  dur: number,
+) {
+  const active = channels.filter((c) => c.enabled);
+  if (active.length === 0) return;
+  const gain = 0.16 / active.length;
+  for (const ch of active) {
+    toneWide(ctx, freq, buildPeriodicWave(ctx, [ch]), start, dur, gain, ch.detune ?? 0);
+  }
 }
 
 function playSound(cfg: Config, onEnd?: () => void) {
@@ -303,7 +337,8 @@ function playSound(cfg: Config, onEnd?: () => void) {
       let t = 0;
       for (const note of cfg.melody) {
         const dur = Math.max(0.05, note.beats) * spb;
-        toneWide(ctx, note.freq, cfg.wave as OscillatorType, t, dur);
+        if (cfg.wave === "custom") toneChannels(ctx, note.freq, cfg.customWave, t, dur);
+        else toneWide(ctx, note.freq, cfg.wave as OscillatorType, t, dur);
         t += dur;
       }
       total = t + 0.2;
@@ -356,77 +391,34 @@ function isNewer(latest: string, current: string): boolean {
 async function checkForUpdate(): Promise<UpdateInfo | null> {
   try {
     const current = await getVersion();
-    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100`);
     if (!res.ok) return null;
-    const data = await res.json();
-    const tag = data.tag_name as string | undefined;
-    const url = data.html_url as string | undefined;
-    if (!tag || !url) return null;
-    if (isNewer(tag, current)) return { latest: tag, url };
+    const releases: { tag_name?: string; html_url?: string; draft?: boolean }[] = await res.json();
+    let best: UpdateInfo | null = null;
+    for (const r of releases) {
+      if (r.draft) continue;
+      const tag = r.tag_name;
+      const url = r.html_url;
+      if (!tag || !url) continue;
+      if (!best || isNewer(tag, best.latest)) best = { latest: tag, url };
+    }
+    if (!best) return null;
+    if (isNewer(best.latest, current)) return best;
   } catch {
     /* sin conexión o API bloqueada */
   }
   return null;
 }
 
-function NumField({
-  label,
-  value,
-  min,
-  max,
-  decimals = 0,
-  hideLabel = false,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  decimals?: number;
-  hideLabel?: boolean;
-  onChange: (n: number) => void;
-}) {
-  const id = useId();
-  const [text, setText] = useState(String(value));
-  const last = useRef(value);
-
-  useEffect(() => {
-    if (value !== last.current) {
-      last.current = value;
-      setText(String(value));
-    }
-  }, [value]);
-
-  return (
-    <TextInput
-      id={id}
-      labelText={label}
-      hideLabel={hideLabel}
-      value={text}
-      onChange={(e) => {
-        const raw = e.target.value;
-        setText(raw);
-        if (raw.trim() === "") return;
-        const n = Number(raw);
-        if (!Number.isFinite(n)) return;
-        const factor = 10 ** decimals;
-        const rounded = Math.round(n * factor) / factor;
-        const clamped = Math.min(max, Math.max(min, rounded));
-        last.current = clamped;
-        onChange(clamped);
-      }}
-      onBlur={() => setText(String(last.current))}
-    />
-  );
-}
-
 function App() {
   const [config, setConfig] = useState<Config | null>(null);
   const [timer, setTimer] = useState<TimerState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [waveEditorOpen, setWaveEditorOpen] = useState(false);
   const [newTask, setNewTask] = useState("");
   const [melodyName, setMelodyName] = useState("");
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState("");
   const [midiPending, setMidiPending] = useState<{
     data: string;
     duration: number;
@@ -525,6 +517,12 @@ function App() {
     }
   };
 
+  const previewWave = () => {
+    const ctx = beginAudio();
+    toneChannels(ctx, 440, config.customWave, 0, 0.7);
+    endAudioAfter(1.0);
+  };
+
   const addNote = () => save({ ...config, melody: [...config.melody, randomNote()] });
 
   const updateNote = (id: string, note: Note) =>
@@ -545,6 +543,7 @@ function App() {
           name,
           tempo: config.tempo,
           wave: config.wave,
+          customWave: config.customWave,
           melody: config.melody,
         },
       ],
@@ -553,7 +552,13 @@ function App() {
   };
 
   const loadMelody = (m: SavedMelody) =>
-    save({ ...config, tempo: m.tempo, wave: m.wave, melody: m.melody });
+    save({
+      ...config,
+      tempo: m.tempo,
+      wave: m.wave,
+      customWave: m.customWave?.length ? m.customWave : config.customWave,
+      melody: m.melody,
+    });
 
   const removeMelody = (id: string) =>
     save({ ...config, savedMelodies: config.savedMelodies.filter((m) => m.id !== id) });
@@ -643,6 +648,17 @@ function App() {
       midiSounds: config.midiSounds.filter((m) => m.id !== id),
       sound: config.sound === `midi:${id}` ? "beep" : config.sound,
     });
+
+  const manualCheck = async () => {
+    setUpdateStatus("Comprobando…");
+    const u = await checkForUpdate();
+    if (u) {
+      setUpdate(u);
+      setUpdateStatus(`Hay una nueva versión disponible (${u.latest}).`);
+    } else {
+      setUpdateStatus("Estás en la última versión.");
+    }
+  };
 
   const addTask = () => {
     const text = newTask.trim();
@@ -779,12 +795,14 @@ function App() {
           size="md"
           onRequestSubmit={() => {
             setSettingsOpen(false);
+            setWaveEditorOpen(false);
             setMidiPending(null);
             stopAudio();
             setPlaying(null);
           }}
           onRequestClose={() => {
             setSettingsOpen(false);
+            setWaveEditorOpen(false);
             setMidiPending(null);
             stopAudio();
             setPlaying(null);
@@ -942,8 +960,16 @@ function App() {
                       <SelectItem value="square" text="Cuadrada" />
                       <SelectItem value="triangle" text="Triangular" />
                       <SelectItem value="sawtooth" text="Sierra" />
+                      <SelectItem value="custom" text="Personalizada…" />
                     </Select>
                   </div>
+                  {config.wave === "custom" && (
+                    <div className="wave-open">
+                      <Button kind="ghost" size="sm" onClick={() => setWaveEditorOpen(true)}>
+                        Editar onda ({config.customWave.filter((c) => c.enabled).length} de 4 canales)
+                      </Button>
+                    </div>
+                  )}
                   <div className="melody-head">
                     <span>Frecuencia (Hz)</span>
                     <span>Tiempos</span>
@@ -1082,6 +1108,13 @@ function App() {
             >
               Restablecer valores
             </Button>
+
+            <div className="update-check">
+              <Button kind="secondary" size="sm" onClick={manualCheck}>
+                Buscar actualizaciones
+              </Button>
+              {updateStatus && <span className="update-status">{updateStatus}</span>}
+            </div>
           </Stack>
         </Modal>
 
@@ -1142,6 +1175,26 @@ function App() {
                   }}
                 >
                   Cancelar
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {waveEditorOpen && (
+          <div className="midi-overlay">
+            <div className="midi-dialog">
+              <h4 className="midi-dialog-title">Editor de onda personalizada</h4>
+              <WaveEditor
+                channels={config.customWave}
+                onChange={(customWave) => save({ ...config, customWave })}
+              />
+              <div className="midi-window-actions">
+                <Button kind="secondary" size="sm" onClick={() => setWaveEditorOpen(false)}>
+                  Listo
+                </Button>
+                <Button kind="ghost" size="sm" renderIcon={VolumeUp} onClick={previewWave}>
+                  Escuchar
                 </Button>
               </div>
             </div>

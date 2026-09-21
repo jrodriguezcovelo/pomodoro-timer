@@ -289,12 +289,79 @@ body,
   flex-wrap: wrap;
 }
 
+.wave-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wave-canvas {
+  width: 100%;
+  height: 200px;
+  display: block;
+  border: 1px solid var(--cds-border-subtle);
+  border-radius: 4px;
+  background: var(--cds-layer-hover);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.wave-axis {
+  stroke: var(--cds-border-subtle);
+  stroke-width: 1;
+}
+
+.wave-line {
+  fill: none;
+  stroke: var(--cds-text-secondary);
+  stroke-width: 1.5;
+  opacity: 0.6;
+}
+
+.wave-line-active {
+  stroke: var(--cds-interactive);
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.wave-handle {
+  fill: var(--cds-interactive);
+}
+
+.wave-editor-controls {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.wave-editor-controls .cds--toggle {
+  min-width: 140px;
+}
+
+.wave-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--cds-text-secondary);
+}
+
 .update-toast {
   position: fixed;
   top: 16px;
   right: 16px;
   z-index: 9000;
   max-width: 360px;
+}
+
+.update-check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-status {
+  font-size: 0.875rem;
+  color: var(--cds-text-secondary);
 }
 
 @media (max-width: 640px) {

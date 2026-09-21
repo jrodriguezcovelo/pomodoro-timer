@@ -42,6 +42,8 @@ struct SavedMelody {
     name: String,
     tempo: f64,
     wave: String,
+    #[serde(default)]
+    custom_wave: Vec<WaveChannel>,
     melody: Vec<Note>,
 }
 
@@ -55,6 +57,38 @@ struct MidiSound {
     from: f64,
     #[serde(default)]
     to: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WaveChannel {
+    enabled: bool,
+    points: Vec<f64>,
+    #[serde(default = "default_gain")]
+    gain: f64,
+    #[serde(default)]
+    detune: f64,
+    #[serde(default)]
+    phase: f64,
+}
+
+fn default_gain() -> f64 {
+    1.0
+}
+
+fn default_wave_channels() -> Vec<WaveChannel> {
+    const N: usize = 32;
+    (0..4)
+        .map(|c| WaveChannel {
+            enabled: c == 0,
+            points: (0..N)
+                .map(|i| (2.0 * std::f64::consts::PI * i as f64 / N as f64).sin())
+                .collect(),
+            gain: 1.0,
+            detune: 0.0,
+            phase: 0.0,
+        })
+        .collect()
 }
 
 fn default_tempo() -> f64 {
@@ -91,6 +125,8 @@ struct Config {
     tempo: f64,
     #[serde(default = "default_wave")]
     wave: String,
+    #[serde(default = "default_wave_channels")]
+    custom_wave: Vec<WaveChannel>,
     #[serde(default = "default_melody")]
     melody: Vec<Note>,
     #[serde(default)]
@@ -115,6 +151,7 @@ impl Default for Config {
             sound: "beep".into(),
             tempo: default_tempo(),
             wave: default_wave(),
+            custom_wave: default_wave_channels(),
             melody: default_melody(),
             saved_melodies: vec![],
             midi_sounds: vec![],
