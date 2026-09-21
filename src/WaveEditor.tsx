@@ -12,6 +12,8 @@ export interface WaveChannel {
   detune: number;
   /** Desfase en grados. */
   phase: number;
+  /** Canal 3D: estéreo en cuadratura (L/R) y mapa isométrico en el editor. */
+  is3d: boolean;
 }
 
 /** Muestras por periodo. */
@@ -22,6 +24,12 @@ const L = N / 2 + 1; // armónicos que Web Audio necesita (hasta Nyquist)
 const W = 600;
 const H = 200;
 const PAD = 10;
+// Proyección isométrica del canal 3D: plano trasero desplazado arriba-derecha.
+const D3X = 90;
+const D3Y = -40;
+const X03 = 110;
+const SPAN3 = W - 2 * D3X - 40;
+const AMP3 = (H / 2 - PAD) * 0.65;
 
 const SHAPES: Record<string, (i: number) => number> = {
   sine: (i) => Math.sin((2 * Math.PI * i) / N),
@@ -41,6 +49,7 @@ export function defaultWaveChannels(): WaveChannel[] {
     gain: 1,
     detune: 0,
     phase: 0,
+    is3d: false,
   }));
 }
 
@@ -51,6 +60,7 @@ function normalize(channels: WaveChannel[]): WaveChannel[] {
     gain: channels[c]?.gain ?? 1,
     detune: channels[c]?.detune ?? 0,
     phase: channels[c]?.phase ?? 0,
+    is3d: channels[c]?.is3d ?? false,
   }));
 }
 
@@ -88,10 +98,32 @@ export function waveCoefficients(channels: WaveChannel[]): {
   return { real, imag };
 }
 
-export function buildPeriodicWave(ctx: AudioContext, channels: WaveChannel[]): PeriodicWave {
-  const { real, imag } = waveCoefficients(channels);
+export function buildPeriodicWave(
+  ctx: AudioContext,
+  channels: WaveChannel[],
+  extraPhase = 0,
+): PeriodicWave {
+  const shifted = extraPhase
+    ? channels.map((c) => ({ ...c, phase: (c.phase ?? 0) + extraPhase }))
+    : channels;
+  const { real, imag } = waveCoefficients(shifted);
   // Sin normalizar para conservar la ganancia relativa entre canales.
   return ctx.createPeriodicWave(real, imag, { disableNormalization: true });
+}
+
+// Misma DFT pero con desfase: se usa para el plano trasero del mapa 3D (cuadratura).
+export function shiftPoints(points: number[], deg: number): number[] {
+  const { real, imag } = waveCoefficients([
+    { enabled: true, points, gain: 1, detune: 0, phase: deg, is3d: false },
+  ]);
+  return Array.from({ length: N }, (_, n) => {
+    let v = 0;
+    for (let k = 1; k < L; k++) {
+      const a = (2 * Math.PI * k * n) / N;
+      v += real[k] * Math.cos(a) + imag[k] * Math.sin(a);
+    }
+    return v;
+  });
 }
 
 // Autocomprobación en dev: la DFT (+ desfase) debe reconstruir la onda dibujada.
@@ -99,7 +131,7 @@ if (import.meta.env.DEV) {
   const src = shapePoints("sine");
   let maxErr = 0;
   for (const phase of [0, 90, 217]) {
-    const { real, imag } = waveCoefficients([{ enabled: true, points: src, gain: 1, detune: 0, phase }]);
+    const { real, imag } = waveCoefficients([{ enabled: true, points: src, gain: 1, detune: 0, phase, is3d: false }]);
     for (let n = 0; n < N; n++) {
       let v = 0;
       for (let k = 1; k < L; k++) {
@@ -110,6 +142,11 @@ if (import.meta.env.DEV) {
       maxErr = Math.max(maxErr, Math.abs(v - expected));
     }
   }
+  const q = shiftPoints(src, 90);
+  maxErr = Math.max(
+    maxErr,
+    ...q.map((v, n) => Math.abs(v - Math.cos((2 * Math.PI * n) / N))),
+  );
   if (maxErr > 1e-6) console.error(`WaveEditor self-check failed: error ${maxErr}`);
 }
 
@@ -144,8 +181,14 @@ export default function WaveEditor({
     const svg = svgRef.current;
     if (!svg) return;
     const r = svg.getBoundingClientRect();
-    const i = Math.min(N - 1, Math.max(0, Math.floor(((clientX - r.left) / r.width) * N)));
-    const v = Math.min(1, Math.max(-1, 1 - ((clientY - r.top) / r.height) * 2));
+    const is3 = draftRef.current[active]?.is3d ?? false;
+    const x0 = is3 ? X03 : 0;
+    const span = is3 ? SPAN3 : W;
+    const amp = is3 ? AMP3 : H / 2 - PAD;
+    const x = ((clientX - r.left) / r.width) * W;
+    const y = ((clientY - r.top) / r.height) * H;
+    const i = Math.min(N - 1, Math.max(0, Math.floor(((x - x0) / span) * N)));
+    const v = Math.min(1, Math.max(-1, (H / 2 - y) / amp));
     update(
       draftRef.current.map((c, ci) =>
         ci === active ? { ...c, points: c.points.map((p, pi) => (pi === i ? v : p)) } : c,
@@ -158,6 +201,30 @@ export default function WaveEditor({
     [...points, points[0]]
       .map((v, i) => `${((i / N) * W).toFixed(1)},${(H / 2 - v * (H / 2 - PAD)).toFixed(1)}`)
       .join(" ");
+
+  // Mapa isométrico: la onda en el plano frontal (layer 0) y su cuadratura (layer 1).
+  const iso = (points: number[], layer: number) =>
+    [...points, points[0]]
+      .map((v, i) => {
+        const t = i / N;
+        return `${(X03 + t * SPAN3 + layer * D3X).toFixed(1)},${(
+          H / 2 -
+          v * AMP3 +
+          layer * D3Y
+        ).toFixed(1)}`;
+      })
+      .join(" ");
+
+  const ribbon = (points: number[]) => {
+    const front = [...points, points[0]].map((v, i) => [X03 + (i / N) * SPAN3, H / 2 - v * AMP3]);
+    const back = [...points, points[0]].map((v, i) => [
+      X03 + (i / N) * SPAN3 + D3X,
+      H / 2 - v * AMP3 + D3Y,
+    ]);
+    return [...front, ...[...back].reverse()]
+      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`)
+      .join(" ");
+  };
 
   const ch = draft[active];
 
@@ -189,20 +256,29 @@ export default function WaveEditor({
       >
         <line x1={0} y1={H / 2} x2={W} y2={H / 2} className="wave-axis" />
         {draft.map((c, i) =>
-          c.enabled ? (
-            <polyline
-              key={i}
-              points={polyline(c.points)}
-              className={i === active ? "wave-line wave-line-active" : "wave-line"}
-            />
+          c.enabled && i !== active ? (
+            <polyline key={i} points={polyline(c.points)} className="wave-line" />
           ) : null,
+        )}
+        {ch.enabled && ch.is3d && (
+          <>
+            <polygon points={ribbon(ch.points)} className="wave-3d-fill" />
+            <polyline
+              points={iso(shiftPoints(ch.points, 90), 1)}
+              className="wave-line wave-line-back"
+            />
+            <polyline points={iso(ch.points, 0)} className="wave-line wave-line-active" />
+          </>
+        )}
+        {ch.enabled && !ch.is3d && (
+          <polyline points={polyline(ch.points)} className="wave-line wave-line-active" />
         )}
         {ch.enabled &&
           ch.points.map((v, i) => (
             <circle
               key={i}
-              cx={(i / N) * W}
-              cy={H / 2 - v * (H / 2 - PAD)}
+              cx={ch.is3d ? X03 + (i / N) * SPAN3 : (i / N) * W}
+              cy={ch.is3d ? H / 2 - v * AMP3 : H / 2 - v * (H / 2 - PAD)}
               r={3}
               className="wave-handle"
             />
@@ -227,6 +303,17 @@ export default function WaveEditor({
           onToggle={(t) =>
             update(
               draft.map((c, i) => (i === active ? { ...c, enabled: t } : c)),
+              true,
+            )
+          }
+        />
+        <Toggle
+          id="wave-channel-3d"
+          labelText="Canal 3D (isométrico)"
+          toggled={ch.is3d}
+          onToggle={(t) =>
+            update(
+              draft.map((c, i) => (i === active ? { ...c, is3d: t } : c)),
               true,
             )
           }
@@ -304,6 +391,7 @@ export default function WaveEditor({
       </div>
       <p className="wave-hint">
         Arrastra sobre el lienzo para dibujar el canal activo. Se suman todos los canales activos.
+        En modo 3D el plano frontal es la onda y el trasero su cuadratura (va a cada oído).
       </p>
     </div>
   );

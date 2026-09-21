@@ -70,5 +70,4 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Pomodoro ${{ github.ref_name }}"
           releaseBody: "Binarios de Pomodoro para Windows y Linux."
-          releaseDraft: true
           prerelease: false
