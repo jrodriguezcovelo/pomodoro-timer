@@ -72,6 +72,10 @@ struct WaveChannel {
     phase: f64,
     #[serde(default)]
     is3d: bool,
+    #[serde(default)]
+    frames: Vec<Vec<f64>>,
+    #[serde(default)]
+    wt_pos: f64,
 }
 
 fn default_gain() -> f64 {
@@ -90,6 +94,8 @@ fn default_wave_channels() -> Vec<WaveChannel> {
             detune: 0.0,
             phase: 0.0,
             is3d: false,
+            frames: vec![],
+            wt_pos: 0.0,
         })
         .collect()
 }

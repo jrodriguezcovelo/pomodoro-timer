@@ -328,16 +328,6 @@ body,
   fill: var(--cds-interactive);
 }
 
-.wave-3d-fill {
-  fill: var(--cds-interactive);
-  opacity: 0.12;
-  stroke: none;
-}
-
-.wave-line-back {
-  stroke-dasharray: 4 3;
-}
-
 .wave-editor-controls {
   display: flex;
   gap: 16px;

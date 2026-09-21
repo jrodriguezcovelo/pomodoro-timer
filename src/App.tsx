@@ -287,37 +287,9 @@ function toneWide(
   make(6 + detuneCents, 0.5, gainVal);
 }
 
-// Dos ondas independientes paneadas L/R: canal 3D en cuadratura.
-function toneStereo(
-  ctx: AudioContext,
-  freq: number,
-  waveL: Wave,
-  waveR: Wave,
-  start: number,
-  dur: number,
-  gainVal = 0.16,
-) {
-  const make = (wave: Wave, pan: number) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const panner = ctx.createStereoPanner();
-    if (typeof wave === "string") osc.type = wave as OscillatorType;
-    else osc.setPeriodicWave(wave);
-    osc.frequency.value = freq;
-    panner.pan.value = pan;
-    gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
-    gain.gain.exponentialRampToValueAtTime(gainVal, ctx.currentTime + start + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
-    osc.connect(gain).connect(panner).connect(ctx.destination);
-    osc.start(ctx.currentTime + start);
-    osc.stop(ctx.currentTime + start + dur + 0.05);
-  };
-  make(waveL, -0.7);
-  make(waveR, 0.7);
-}
-
 // Onda personalizada: un oscilador por canal, con su ganancia y detune. El
-// desfase va dentro de los coeficientes (buildPeriodicWave).
+// desfase va dentro de los coeficientes (buildPeriodicWave); el wavetable 3D ya
+// viene interpolado por frameAt(), así que aquí no hay nada especial.
 function toneChannels(
   ctx: AudioContext,
   freq: number,
@@ -329,20 +301,7 @@ function toneChannels(
   if (active.length === 0) return;
   const gain = 0.16 / active.length;
   for (const ch of active) {
-    if (ch.is3d) {
-      // Cuadratura: la onda va a un oído y su +90° al otro.
-      toneStereo(
-        ctx,
-        freq,
-        buildPeriodicWave(ctx, [ch]),
-        buildPeriodicWave(ctx, [ch], 90),
-        start,
-        dur,
-        gain,
-      );
-    } else {
-      toneWide(ctx, freq, buildPeriodicWave(ctx, [ch]), start, dur, gain, ch.detune ?? 0);
-    }
+    toneWide(ctx, freq, buildPeriodicWave(ctx, [ch]), start, dur, gain, ch.detune ?? 0);
   }
 }
 
